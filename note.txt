@@ -1,0 +1,5 @@
+Fail to incoporate the point cloud into the whole scene.
+
+May need to render outside and run view crafter separately for each frame to gather novel views.
+
+render video outside of the viewcrafter

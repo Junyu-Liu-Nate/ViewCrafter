@@ -524,6 +524,26 @@ def world_point_to_kth(poses, points, k, device):
 
     return new_poses, new_points
 
+def world_point_to_kth_custom(poses, points, k, device):
+    # Transform world coordinate system to be consistent with the camera coordinate system of the kth pose
+    kth_pose = poses[k]  # Shape: [4, 4]
+    inv_kth_pose = torch.inverse(kth_pose)  # Shape: [4, 4]
+
+    # Left-multiply all poses with inv_kth_pose to transform them to the kth_pose's camera coordinate system
+    # new_poses = torch.matmul(inv_kth_pose.unsqueeze(0), poses)  # Shape: [N, 4, 4]
+    new_poses = torch.bmm(inv_kth_pose.unsqueeze(0).expand_as(poses), poses)
+
+    # Points shape: [N, num_points, 3]
+    N, num_points, _ = points.shape
+    homogeneous_points = torch.cat([points, torch.ones(N, num_points, 1, device=device)], dim=-1)  # [N, num_points, 4]
+
+    # Transform points
+    inv_kth_pose = inv_kth_pose.unsqueeze(0)  # [1, 4, 4]
+    new_points = torch.matmul(homogeneous_points, inv_kth_pose.transpose(1, 2))  # [N, num_points, 4]
+    new_points = new_points[..., :3]  # [N, num_points, 3]
+
+    return new_poses, new_points
+
 
 def world_point_to_obj(poses, points, k, r, elevation, device):
     ## 作用:将世界坐标系转到object的中心
@@ -552,6 +572,37 @@ def world_point_to_obj(poses, points, k, r, elevation, device):
     homogeneous_points = torch.cat([points, torch.ones(N, W*H, 1).to(device)], dim=-1)  
     new_points = inv_obj_pose.unsqueeze(0).expand(N, -1, -1).unsqueeze(1)@ homogeneous_points.unsqueeze(-1)
     new_points = new_points.squeeze(-1)[...,:3].view(N, W, H, _)
+    
+    return new_poses, new_points
+
+def world_point_to_obj_custom(poses, points, k, r, elevation, device):
+    ## 作用:将世界坐标系转到object的中心
+
+    ## Transform world coordinate system to be consistent with the camera coordinate system of the kth pose
+    poses, points = world_point_to_kth_custom(poses, points, k, device)
+    
+    ## Define the target coordinate system pose, with the origin at the object center (from world coordinates [0, 0, r]), Y-axis up, Z-axis outward, X-axis right
+    elevation_rad = torch.deg2rad(torch.tensor(180 - elevation)).to(device)
+    sin_value_x = torch.sin(elevation_rad)
+    cos_value_x = torch.cos(elevation_rad)
+    R = torch.tensor([
+        [1, 0, 0],
+        [0, cos_value_x, sin_value_x],
+        [0, -sin_value_x, cos_value_x]
+    ]).to(device)
+    
+    t = torch.tensor([0, 0, r]).to(device)  # Use r.item() to convert tensor to scalar
+    pose_obj = torch.eye(4).to(device)
+    pose_obj[:3, :3] = R
+    pose_obj[:3, 3] = t
+
+    ## Multiply all points and poses by the inverse of the target coordinate system pose (w2c), transforming them to the target coordinate system
+    inv_obj_pose = torch.inverse(pose_obj)
+    new_poses = torch.matmul(inv_obj_pose.unsqueeze(0), poses)
+    N, num_points, _ = points.shape
+    homogeneous_points = torch.cat([points, torch.ones(N, num_points, 1).to(device)], dim=-1)
+    new_points = torch.matmul(homogeneous_points, inv_obj_pose.transpose(0, 1))
+    new_points = new_points[..., :3]
     
     return new_poses, new_points
 

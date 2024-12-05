@@ -20,6 +20,7 @@ if __name__=="__main__":
 
     elif opts.mode == 'single_view_txt':
         pvd.nvs_single_view()
+        # pvd.nvs_single_view_custom()
 
     elif opts.mode == 'single_view_eval':
         pvd.nvs_single_view_eval()

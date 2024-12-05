@@ -27,24 +27,62 @@ from utils.diffusion_utils import instantiate_from_config,load_model_checkpoint,
 from pathlib import Path
 from torchvision.utils import save_image
 
+from utils.custom_scene import CustomScene
+import os
+import cv2
+import torch
+
 class ViewCrafter:
     def __init__(self, opts, gradio = False):
         self.opts = opts
         self.device = opts.device
+        
+        ###----- Original code using dust3r -----###
         self.setup_dust3r()
-        self.setup_diffusion()
         # initialize ref images, pcd
         if not gradio:
             if os.path.isfile(self.opts.image_dir):
                 self.images, self.img_ori = self.load_initial_images(image_dir=self.opts.image_dir)
-                self.run_dust3r(input_images=self.images)
+                self.run_dust3r(input_images=self.images) #TODO: input the static point cloud here!
             elif os.path.isdir(self.opts.image_dir):
                 self.images, self.img_ori = self.load_initial_dir(image_dir=self.opts.image_dir)
                 self.run_dust3r(input_images=self.images, clean_pc = True)    
             else:
-                print(f"{self.opts.image_dir} doesn't exist")           
+                print(f"{self.opts.image_dir} doesn't exist") 
+        ###-------------------------------------###
+        
+        ###----- Load custom pc -----###
+        # data_dir = '/users/ljunyu/data/ljunyu/code/csci2951i/monst3r/demo_tmp/lady-running-65-224'
+        # frame_num = 18
+        # self.scene = CustomScene(data_dir, frame_num, device=self.device)
+        # self.load_initial_images_custom()
+        ###-------------------------------------###
+
+        self.setup_diffusion()       
+
+    def load_initial_images_custom(self):
+        # Use images from the custom scene
+        imgs = self.scene.get_imgs()
+        # Get image dimensions
+        H, W = imgs[0].shape[1], imgs[0].shape[2]
+        self.images = []
+        self.img_ori = []
+        for idx, img_tensor in enumerate(imgs):
+            # Assume img_tensor is [C, H, W], normalize to [-1, 1]
+            img_normalized = (img_tensor * 2.0) - 1.0
+            self.images.append({
+                'img': img_normalized.unsqueeze(0),  # Add batch dimension
+                'true_shape': torch.tensor([[H, W]]),
+                'idx': idx,
+                'img_ori': img_tensor.permute(1, 2, 0)  # [H, W, C]
+            })
+            # Store the first image as self.img_ori (as a tensor)
+            self.img_ori = imgs[0].permute(1, 2, 0)  # [H, W, C]
         
     def run_dust3r(self, input_images,clean_pc = False):
+        """
+        The dense point cloud is generated at here
+        """
         pairs = make_pairs(input_images, scene_graph='complete', prefilter=None, symmetrize=True)
         output = inference(pairs, self.dust3r, self.device, batch_size=self.opts.batch_size)
 
@@ -83,13 +121,52 @@ class ViewCrafter:
 
         return images, view_masks
     
+    def render_pcd_custom(self, pts3d, pts_colors, views, renderer, device, nbv=False):
+        '''
+        Directly render from point cloud
+        '''
+        # Concatenate all point clouds and colors
+        pts = torch.cat(pts3d, dim=0).to(device)      # Shape: [num_points, 3]
+        col = torch.cat(pts_colors, dim=0).to(device) # Shape: [num_points, 3]
+        print(f'col: {col}')
+
+        # Ensure that pts and col have matching number of points
+        assert pts.shape[0] == col.shape[0], "Number of points and colors must match."
+
+        # Proceed with rendering
+        point_cloud = Pointclouds(points=[pts], features=[col]).extend(views)
+        images = renderer(point_cloud)
+        visualization_dir = os.path.join(self.opts.save_dir, 'visualization')
+        os.makedirs(visualization_dir, exist_ok=True)
+
+        for idx, img in enumerate(images.cpu()):
+            print(img)
+            exit()
+            save_path = os.path.join(visualization_dir, f'image_{idx}.png')
+            save_image(img, save_path, normalize=True, value_range=(0, 1))
+        exit()
+
+        if nbv:
+            color_mask = torch.ones_like(col).to(device)
+            point_cloud_mask = Pointclouds(points=[pts], features=[color_mask]).extend(views)
+            view_masks = renderer(point_cloud_mask)
+        else:
+            view_masks = None
+
+        return images, view_masks
+    
     def run_render(self, pcd, imgs,masks, H, W, camera_traj,num_views,nbv=False):
         render_setup = setup_renderer(camera_traj, image_size=(H,W))
         renderer = render_setup['renderer']
         render_results, viewmask = self.render_pcd(pcd, imgs, masks, num_views,renderer,self.device,nbv=False)
         return render_results, viewmask
-
     
+    def run_render_custom(self, pcd, pcd_colors, H, W, camera_traj, num_views, nbv=False):
+        render_setup = setup_renderer(camera_traj, image_size=(H,W))
+        renderer = render_setup['renderer']
+        render_results, viewmask = self.render_pcd_custom(pcd, pcd_colors, num_views, renderer, self.device, nbv=False)
+        return render_results, viewmask
+
     def run_diffusion(self, renderings):
 
         prompts = [self.opts.prompt]
@@ -117,8 +194,13 @@ class ViewCrafter:
         depth_avg = depth[-1][H//2,W//2] #以图像中心处的depth(z)为球心旋转
         radius = depth_avg*self.opts.center_scale #缩放调整
 
+        print(f'c2ws: {c2ws}')
+        # print(f'pcd shape: {len(pcd)}')
+        print(f'radius: {radius}')
         ## change coordinate
-        c2ws,pcd =  world_point_to_obj(poses=c2ws, points=torch.stack(pcd), k=-1, r=radius, elevation=self.opts.elevation, device=self.device)
+        c2ws,pcd = world_point_to_obj(poses=c2ws, points=torch.stack(pcd), k=-1, r=radius, elevation=self.opts.elevation, device=self.device)
+        print(f'c2ws: {c2ws}')
+        # exit()
 
         imgs = np.array(self.scene.imgs)
         
@@ -156,6 +238,7 @@ class ViewCrafter:
 
         render_results, viewmask = self.run_render([pcd[-1]], [imgs[-1]],masks, H, W, camera_traj,num_views)
         render_results = F.interpolate(render_results.permute(0,3,1,2), size=(576, 1024), mode='bilinear', align_corners=False).permute(0,2,3,1)
+        print(f'render_results shape: {render_results.shape}')
         render_results[0] = self.img_ori
         if self.opts.mode == 'single_view_txt':
             if phi[-1]==0. and theta[-1]==0. and r[-1]==0.:
@@ -163,6 +246,151 @@ class ViewCrafter:
                 
         save_video(render_results, os.path.join(self.opts.save_dir, 'render0.mp4'))
         save_pointcloud_with_normals([imgs[-1]], [pcd[-1]], msk=None, save_path=os.path.join(self.opts.save_dir,'pcd0.ply') , mask_pc=False, reduce_pc=False)
+        diffusion_results = self.run_diffusion(render_results)
+        save_video((diffusion_results + 1.0) / 2.0, os.path.join(self.opts.save_dir, 'diffusion0.mp4'))
+
+        return diffusion_results
+
+    # def load_video(self, video_name):
+    #     data_dir = '/users/ljunyu/data/ljunyu/code/csci2951i/monst3r/demo_tmp/lady-running-65-224'
+    #     video_path = os.path.join(data_dir, video_name + '.mp4')
+        
+    #     cap = cv2.VideoCapture(video_path)
+    #     frames = []
+    #     while True:
+    #         ret, frame = cap.read()
+    #         if not ret:
+    #             break
+    #         # Resize frame to (1024, 576)
+    #         frame_resized = cv2.resize(frame, (1024, 576))
+    #         # Convert BGR to RGB
+    #         frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+    #         frames.append(frame_rgb)
+    #     cap.release()
+    #     # Convert to torch.Tensor and normalize to [0, 1]
+    #     video_tensor = torch.tensor(frames).float() / 255.0
+    #     return video_tensor
+
+    def load_video(self, video_name, num_frames=25):
+        data_dir = '/users/ljunyu/data/ljunyu/code/csci2951i/monst3r/demo_tmp/lady-running-65-224'
+        video_path = os.path.join(data_dir, video_name + '.mp4')
+        
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # Resize frame to (1024, 576)
+            frame_resized = cv2.resize(frame, (1024, 576))
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+        cap.release()
+
+        if len(frames) == 0:
+            raise ValueError("No frames could be read from the video.")
+
+        # Ensure the first and last frames are included
+        sampled_indices = np.linspace(0, len(frames) - 1, num_frames, dtype=int)
+        sampled_frames = [frames[idx] for idx in sampled_indices]
+
+        # Convert to torch.Tensor and normalize to [0, 1]
+        video_tensor = torch.tensor(sampled_frames).float() / 255.0
+        return video_tensor
+
+    def nvs_single_view_custom(self, gradio=False):
+        # # 最后一个view为 0 pose
+        # c2ws = self.scene.get_im_poses().detach()  # Remove [1:]
+        # principal_points = self.scene.get_principal_points().detach()  # Remove [1:]
+        # focals = self.scene.get_focals().detach()  # Remove [1:]
+        # shape = self.images[0]['true_shape']
+        # H, W = int(shape[0][0]), int(shape[0][1])
+        # pcd = [i.detach() for i in self.scene.get_pts3d(clip_thred=self.opts.dpt_trd)]  # a list with one tensor
+        # pcd_colors = [i.detach() for i in self.scene.get_pcd_colors()]  # List with one tensor
+        # depth = [i.detach() for i in self.scene.get_depthmaps()]
+        # H, W = depth[0].shape[0], depth[0].shape[1]
+        # # Extract the depth pixel at the center of the image
+        # depth_pixel = depth[0][H // 2, W // 2]  # Shape: [3]
+        # # Decode the depth value from RGB channels
+        # R = depth_pixel[0].item()
+        # G = depth_pixel[1].item()
+        # B = depth_pixel[2].item()
+        # depth_value = R + G * 256 + B * 256 * 256
+        # # Optionally scale the depth value if necessary
+        # # For example, divide by 1000 to convert from millimeters to meters
+        # depth_value = depth_value / 10000000  # Determine the correct scaling factor
+        # # Calculate radius as a Python scalar
+        # radius = depth_value * self.opts.center_scale  # Now radius is a float
+        # print(f'radius: {radius}')
+
+        # ## change coordinate
+        # # c2ws,pcd = world_point_to_obj(poses=c2ws, points=torch.stack(pcd), k=-1, r=radius, elevation=self.opts.elevation, device=self.device)
+        # # Prepare the point cloud for transformation
+        # points = pcd[0].unsqueeze(0)  # Shape: [1, num_points, 3]
+        # print(f'c2ws: {c2ws}')
+        # # Apply custom coordinate transformation
+        # c2ws, points = world_point_to_obj_custom(
+        #     poses=c2ws,
+        #     points=points,
+        #     k=0,
+        #     r=radius,
+        #     elevation=self.opts.elevation,
+        #     device=self.device
+        # )
+        # print(f'c2ws: {c2ws}')
+        
+        # # Update pcd with transformed points
+        # pcd = [points.squeeze(0)]  # Shape: [num_points, 3]
+
+        # # imgs = np.array(self.scene.imgs)
+        # imgs = [img.permute(1, 2, 0).cpu().numpy() for img in self.scene.get_imgs()]  # Convert to list of numpy arrays
+        
+        # masks = None
+
+        # if self.opts.mode == 'single_view_nbv':
+        #     ## 输入candidate->渲染mask->最大mask对应的pose作为nbv
+        #     ## nbv模式下self.opts.d_theta[0], self.opts.d_phi[0]代表search space中的网格theta, phi之间的间距; self.opts.d_phi[0]的符号代表方向,分为左右两个方向
+        #     ## FIXME hard coded candidate view数量, 以left为例,第一次迭代从[左,左上]中选取, 从第二次开始可以从[左,左上,左下]中选取
+        #     num_candidates = 2
+        #     candidate_poses,thetas,phis = generate_candidate_poses(c2ws, H, W, focals, principal_points, self.opts.d_theta[0], self.opts.d_phi[0],num_candidates, self.device)
+        #     _, viewmask = self.run_render([pcd[-1]], [imgs[-1]],masks, H, W, candidate_poses,num_candidates)
+        #     nbv_id = torch.argmin(viewmask.sum(dim=[1,2,3])).item()
+        #     save_image( viewmask.permute(0,3,1,2), os.path.join(self.opts.save_dir,f"candidate_mask0_nbv{nbv_id}.png"), normalize=True, value_range=(0, 1))
+        #     theta_nbv = thetas[nbv_id]
+        #     phi_nbv = phis[nbv_id]
+        #     # generate camera trajectory from T_curr to T_nbv
+        #     camera_traj,num_views = generate_traj_specified(c2ws, H, W, focals, principal_points, theta_nbv, phi_nbv, self.opts.d_r[0],self.opts.video_length, self.device)
+        #     # 重置elevation
+        #     self.opts.elevation -= theta_nbv
+        # elif self.opts.mode == 'single_view_target':
+        #     camera_traj,num_views = generate_traj_specified(c2ws, H, W, focals, principal_points, self.opts.d_theta[0], self.opts.d_phi[0], self.opts.d_r[0],self.opts.d_x[0]*depth_avg/focals.item(),self.opts.d_y[0]*depth_avg/focals.item(),self.opts.video_length, self.device)
+        # elif self.opts.mode == 'single_view_txt':
+        #     if not gradio:
+        #         with open(self.opts.traj_txt, 'r') as file:
+        #             lines = file.readlines()
+        #             phi = [float(i) for i in lines[0].split()]
+        #             theta = [float(i) for i in lines[1].split()]
+        #             r = [float(i) for i in lines[2].split()]
+        #     else: 
+        #         phi, theta, r = self.gradio_traj
+        #     camera_traj,num_views = generate_traj_txt(c2ws.float(), H, W, focals.float(), principal_points.float(), phi, theta, r,self.opts.video_length, self.device,viz_traj=True, save_dir = self.opts.save_dir)
+        # else:
+        #     raise KeyError(f"Invalid Mode: {self.opts.mode}")
+
+        # # render_results, viewmask = self.run_render([pcd[-1]], [imgs[-1]],masks, H, W, camera_traj,num_views)
+        # render_results, viewmask = self.run_render_custom(pcd, pcd_colors, H, W, camera_traj, num_views)
+        # render_results = F.interpolate(render_results.permute(0,3,1,2), size=(576, 1024), mode='bilinear', align_corners=False).permute(0,2,3,1)
+        # # render_results[0] = self.img_ori
+        # # if self.opts.mode == 'single_view_txt':
+        # #     if phi[-1]==0. and theta[-1]==0. and r[-1]==0.:
+        # #         render_results[-1] = self.img_ori
+
+        render_results = self.load_video('rendered_video_1')
+        print(f'render_results shape: {render_results.shape}')
+                
+        save_video(render_results, os.path.join(self.opts.save_dir, 'render0.mp4'))
+        # save_pointcloud_with_normals([imgs[-1]], [pcd[-1]], msk=None, save_path=os.path.join(self.opts.save_dir,'pcd0.ply') , mask_pc=False, reduce_pc=False)
         diffusion_results = self.run_diffusion(render_results)
         save_video((diffusion_results + 1.0) / 2.0, os.path.join(self.opts.save_dir, 'diffusion0.mp4'))
 
