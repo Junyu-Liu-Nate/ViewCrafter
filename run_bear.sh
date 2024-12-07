@@ -16,8 +16,8 @@ cd ../code/csci2951i/ViewCrafter/
 for i in $(seq -w 0 60); do
     python inference.py \
         --image_dir test/bear/frame_00$i.png \
-        --out_dir ./output/bear/wave1/ \
-        --traj_txt test/trajs/wave1.txt \
+        --out_dir ./output/bear_traj/zoomin1/ \
+        --traj_txt test/trajs/zoomin1.txt \
         --mode 'single_view_txt' \
         --center_scale 1. \
         --elevation=5 \

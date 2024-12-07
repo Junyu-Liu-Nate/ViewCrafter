@@ -58,7 +58,7 @@ class ViewCrafter:
         # self.load_initial_images_custom()
         ###-------------------------------------###
 
-        self.setup_diffusion()       
+        # self.setup_diffusion()       
 
     def load_initial_images_custom(self):
         # Use images from the custom scene
@@ -194,12 +194,12 @@ class ViewCrafter:
         depth_avg = depth[-1][H//2,W//2] #以图像中心处的depth(z)为球心旋转
         radius = depth_avg*self.opts.center_scale #缩放调整
 
-        print(f'c2ws: {c2ws}')
+        # print(f'c2ws: {c2ws}')
         # print(f'pcd shape: {len(pcd)}')
-        print(f'radius: {radius}')
+        # print(f'radius: {radius}')
         ## change coordinate
         c2ws,pcd = world_point_to_obj(poses=c2ws, points=torch.stack(pcd), k=-1, r=radius, elevation=self.opts.elevation, device=self.device)
-        print(f'c2ws: {c2ws}')
+        # print(f'c2ws: {c2ws}')
         # exit()
 
         imgs = np.array(self.scene.imgs)
@@ -236,6 +236,31 @@ class ViewCrafter:
         else:
             raise KeyError(f"Invalid Mode: {self.opts.mode}")
 
+        ##### Export the camera information #####
+        # Export camera parameters
+        save_dir = self.opts.save_dir
+        os.makedirs(save_dir, exist_ok=True)
+        camera_params_file = os.path.join(save_dir, 'camera_params.txt')
+
+        cx, cy = principal_points[0].cpu().numpy()
+        focal = focals[0][0].cpu().numpy()
+        intrinsics = [[focal, 0, cx], [0, focal, cy], [0, 0, 1]]
+
+        with open(camera_params_file, 'w') as f:
+            for i in range(num_views):
+                w2c = camera_traj.get_world_to_view_transform().get_matrix()[i].cpu().numpy()
+                # print(f'w2c: {w2c}')
+                
+                f.write(f'Frame {i}:\n')
+                f.write('w2c:\n')
+                for row in w2c:
+                    f.write(' '.join(map(str, row)) + '\n')
+                f.write('intrinsics:\n')
+                for row in intrinsics:
+                    f.write(' '.join(map(str, row)) + '\n')
+                f.write('\n')
+        exit()
+        
         render_results, viewmask = self.run_render([pcd[-1]], [imgs[-1]],masks, H, W, camera_traj,num_views)
         render_results = F.interpolate(render_results.permute(0,3,1,2), size=(576, 1024), mode='bilinear', align_corners=False).permute(0,2,3,1)
         print(f'render_results shape: {render_results.shape}')
